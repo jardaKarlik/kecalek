@@ -1,63 +1,70 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  createAudioPlayer,
-  setAudioModeAsync,
-  AudioPlayer,
-} from "expo-audio";
+  Audio,
+  AVPlaybackStatus,
+  InterruptionModeAndroid,
+  InterruptionModeIOS,
+} from "expo-av";
 
-// Nastav audio mode jednou globálně
-setAudioModeAsync({
-  shouldPlayInBackground: true,
-  playsInSilentMode: true,
-  interruptionMode: "duckOthers",
-  shouldRouteThroughEarpiece: false,
+Audio.setAudioModeAsync({
+  allowsRecordingIOS: false,
+  staysActiveInBackground: true,
+  interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+  interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+  playsInSilentModeIOS: true,
+  shouldDuckAndroid: true,
+  shouldPlayThroughEarpieceAndroid: false,
 });
 
 export function usePlayer() {
-  const playerRef      = useRef<AudioPlayer | null>(null);
-  const chunksRef      = useRef<string[]>([]);
-  const chunkIndexRef  = useRef<number>(0);
-  const rateRef        = useRef<number>(1.0);
-  const isPlayingRef   = useRef<boolean>(false);
+  const playerRef = useRef<Audio.Sound | null>(null);
+  const chunksRef = useRef<string[]>([]);
+  const chunkIndexRef = useRef<number>(0);
+  const rateRef = useRef<number>(1.0);
+  const isPlayingRef = useRef<boolean>(false);
 
-  const [isPlaying,    setIsPlaying]    = useState(false);
-  const [isLoading,    setIsLoading]    = useState(false);
-  const [positionMs,   setPositionMs]   = useState(0);
-  const [durationMs,   setDurationMs]   = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [positionMs, setPositionMs] = useState(0);
+  const [durationMs, setDurationMs] = useState(0);
   const [currentTitle, setCurrentTitle] = useState("");
-  const [chunkIndex,   setChunkIndex]   = useState(0);
-  const [totalChunks,  setTotalChunks]  = useState(0);
+  const [chunkIndex, setChunkIndex] = useState(0);
+  const [totalChunks, setTotalChunks] = useState(0);
 
-  // Polling pro position update (expo-audio nemá onPlaybackStatusUpdate)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  async function getStatus(): Promise<AVPlaybackStatus | null> {
+    try {
+      return playerRef.current ? await playerRef.current.getStatusAsync() : null;
+    } catch {
+      return null;
+    }
+  }
 
   function startPolling() {
     stopPolling();
-    pollRef.current = setInterval(() => {
-      const p = playerRef.current;
-      if (!p) return;
-      try {
-        setPositionMs(Math.round(p.currentTime * 1000));
-        setDurationMs(Math.round((p.duration ?? 0) * 1000));
-        const playing = p.playing;
-        isPlayingRef.current = playing;
-        setIsPlaying(playing);
+    pollRef.current = setInterval(async () => {
+      const status = await getStatus();
+      if (!status || !status.isLoaded) return;
 
-        // Auto-advance: přehráno do konce
-        if (p.currentTime > 0 && p.duration > 0 &&
-            p.currentTime >= p.duration - 0.3 && !playing) {
-          const nextIndex = chunkIndexRef.current + 1;
-          if (nextIndex < chunksRef.current.length) {
-            _loadChunk(chunksRef.current[nextIndex], nextIndex, true);
-          } else {
-            stopPolling();
-            setIsPlaying(false);
-            setPositionMs(0);
-            chunkIndexRef.current = 0;
-            setChunkIndex(0);
-          }
+      const playing = status.isPlaying;
+      isPlayingRef.current = playing;
+      setIsPlaying(playing);
+      setPositionMs(status.positionMillis ?? 0);
+      setDurationMs(status.durationMillis ?? 0);
+
+      if (status.didJustFinish && !status.isLooping) {
+        const nextIndex = chunkIndexRef.current + 1;
+        if (nextIndex < chunksRef.current.length) {
+          _loadChunk(chunksRef.current[nextIndex], nextIndex, true);
+        } else {
+          stopPolling();
+          setIsPlaying(false);
+          setPositionMs(0);
+          chunkIndexRef.current = 0;
+          setChunkIndex(0);
         }
-      } catch (_) {}
+      }
     }, 500);
   }
 
@@ -68,50 +75,47 @@ export function usePlayer() {
     }
   }
 
+  async function unloadCurrent() {
+    if (!playerRef.current) return;
+    try {
+      await playerRef.current.unloadAsync();
+    } catch {
+      // ignore
+    }
+    playerRef.current = null;
+  }
+
   async function _loadChunk(url: string, index: number, autoPlay: boolean) {
     setIsLoading(true);
     setPositionMs(0);
     setDurationMs(0);
 
-    // Zruš starý player
-    if (playerRef.current) {
-      try {
-        playerRef.current.pause();
-        playerRef.current.remove();
-      } catch (_) {}
-      playerRef.current = null;
-    }
+    await unloadCurrent();
 
     chunkIndexRef.current = index;
     setChunkIndex(index);
 
-    // Vytvoř nový player
-    const player = createAudioPlayer({ uri: url });
+    const player = new Audio.Sound();
     playerRef.current = player;
 
-    // Počkej na načtení (polling)
-    let waited = 0;
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        waited += 100;
-        if ((player.duration ?? 0) > 0 || waited > 8000) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 100);
-    });
+    const status = await player.loadAsync(
+      { uri: url },
+      {
+        shouldPlay: autoPlay,
+        rate: rateRef.current,
+        shouldCorrectPitch: true,
+      },
+      false
+    );
 
-    player.rate = rateRef.current;
-
-    if (autoPlay) {
-      player.play();
-    }
-
+    setPositionMs(status.positionMillis ?? 0);
+    setDurationMs(status.durationMillis ?? 0);
+    const playing = status.isPlaying ?? false;
+    isPlayingRef.current = playing;
+    setIsPlaying(playing);
     setIsLoading(false);
     startPolling();
   }
-
-  // ── Veřejné API ──────────────────────────────────────────────────────────
 
   async function loadAndPlay(audioUrl: string | string[], title: string) {
     const urls = Array.isArray(audioUrl) ? audioUrl : [audioUrl];
@@ -121,32 +125,41 @@ export function usePlayer() {
     await _loadChunk(urls[0], 0, true);
   }
 
-  function togglePlay() {
-    const p = playerRef.current;
-    if (!p) return;
-    if (p.playing) {
-      p.pause();
+  async function togglePlay() {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const status = await getStatus();
+    if (!status || !status.isLoaded) return;
+
+    if (status.isPlaying) {
+      await player.pauseAsync();
       setIsPlaying(false);
     } else {
-      p.play();
+      await player.playAsync();
       setIsPlaying(true);
     }
   }
 
-  function seekBy(ms: number) {
-    const p = playerRef.current;
-    if (!p) return;
-    const next = Math.max(0, Math.min(
-      p.currentTime + ms / 1000,
-      p.duration ?? 0
-    ));
-    p.seekTo(next);
+  async function seekBy(ms: number) {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const status = await getStatus();
+    if (!status || !status.isLoaded || status.durationMillis == null) return;
+
+    const next = Math.max(0, Math.min(status.positionMillis + ms, status.durationMillis));
+    await player.setPositionAsync(next);
   }
 
-  function seekTo(ratio: number) {
-    const p = playerRef.current;
-    if (!p || (p.duration ?? 0) === 0) return;
-    p.seekTo(ratio * (p.duration ?? 0));
+  async function seekTo(ratio: number) {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const status = await getStatus();
+    if (!status || !status.isLoaded || status.durationMillis == null) return;
+
+    await player.setPositionAsync(Math.floor(ratio * status.durationMillis));
   }
 
   async function goToChunk(index: number) {
@@ -154,22 +167,28 @@ export function usePlayer() {
     await _loadChunk(chunksRef.current[index], index, isPlayingRef.current);
   }
 
-  function setRate(rate: number) {
+  async function setRate(rate: number) {
     rateRef.current = rate;
-    if (playerRef.current) {
-      playerRef.current.rate = rate;
+    if (!playerRef.current) return;
+    try {
+      await playerRef.current.setRateAsync(rate, true);
+    } catch {
+      // ignore
     }
   }
 
-  function stop() {
+  async function stop() {
     stopPolling();
     if (playerRef.current) {
       try {
-        playerRef.current.pause();
-        playerRef.current.remove();
-      } catch (_) {}
+        await playerRef.current.stopAsync();
+        await playerRef.current.unloadAsync();
+      } catch {
+        // ignore
+      }
       playerRef.current = null;
     }
+
     setIsPlaying(false);
     setIsLoading(false);
     setPositionMs(0);
@@ -179,16 +198,25 @@ export function usePlayer() {
   }
 
   useEffect(() => {
-    return () => { stop(); };
+    return () => {
+      void stop();
+    };
   }, []);
 
   return {
-    isPlaying, isLoading,
-    positionMs, durationMs,
+    isPlaying,
+    isLoading,
+    positionMs,
+    durationMs,
     currentTitle,
-    chunkIndex, totalChunks,
-    loadAndPlay, togglePlay,
-    seekBy, seekTo,
-    goToChunk, setRate, stop,
+    chunkIndex,
+    totalChunks,
+    loadAndPlay,
+    togglePlay,
+    seekBy,
+    seekTo,
+    goToChunk,
+    setRate,
+    stop,
   };
 }

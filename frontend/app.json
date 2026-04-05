@@ -18,8 +18,7 @@
     },
     "plugins": [
       "expo-router",
-      "expo-document-picker",
-      "expo-audio"
+      "expo-document-picker"
     ]
   }
 }

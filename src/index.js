@@ -1,13 +1,11 @@
-import { readFileSync, existsSync } from "fs";
+import "dotenv/config";
 import { readFile } from "fs/promises";
 
-// Load .env manually (no extra dependency)
-if (existsSync(".env")) {
-  for (const line of readFileSync(".env", "utf8").split("\n")) {
-    const match = line.match(/^([^#=\s][^=]*)=(.*)$/);
-    if (match) process.env[match[1].trim()] ||= match[2].trim();
-  }
-}
+console.log("ENV check:", {
+  anthropic: !!process.env.ANTHROPIC_API_KEY,
+  fal: !!process.env.FAL_KEY,
+  falPrefix: process.env.FAL_KEY?.slice(0, 8),
+});
 
 import express from "express";
 import formidable from "formidable";
@@ -47,16 +45,13 @@ app.post("/extract-url", async (req, res) => {
 
     const { title, text, siteName, byline } = await extractArticle(url);
     const naturalText = await naturalizeText(text);
-    const audioResult = await synthesize(naturalText, voice);
-    const audioUrl = typeof audioResult === "string" ? audioResult : undefined;
-    const audioUrls = typeof audioResult === "object" ? audioResult.audioUrls : undefined;
+    const audioUrl = await synthesize(naturalText, voice);
 
     const result = {
       title,
       siteName,
       byline,
       audioUrl,
-      audioUrls,
       naturalText,
       wordCount: naturalText.split(/\s+/).length,
     };
@@ -113,11 +108,9 @@ app.post("/process-chapter", async (req, res) => {
     }
 
     const naturalText = await naturalizeText(text);
-    const audioResult = await synthesize(naturalText, voice);
-    const audioUrl = typeof audioResult === "string" ? audioResult : undefined;
-    const audioUrls = typeof audioResult === "object" ? audioResult.audioUrls : undefined;
+    const audioUrl = await synthesize(naturalText, voice);
 
-    const result = { chapterId, audioUrl, audioUrls, naturalText };
+    const result = { chapterId, audioUrl, naturalText };
     cache.set(chapterId, result);
     res.json(result);
   } catch (err) {
