@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Kecálek",
+    "slug": "kecalek",
+    "scheme": "kecalek",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "backgroundColor": "#0f0f23",
+    "ios": {
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "softwareKeyboardLayoutMode": "pan"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-document-picker",
+      "expo-audio"
+    ]
+  }
+}
