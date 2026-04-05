@@ -1,4 +1,4 @@
-import Slider from "@react-native-community/slider";
+import { ProgressBar } from "../components/ProgressBar";
 import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
@@ -54,9 +54,6 @@ export default function PlayerScreen() {
     await player.setRate(rate);
   }
 
-  const progress =
-    player.durationMs > 0 ? player.positionMs / player.durationMs : 0;
-
   return (
     <SafeAreaView style={styles.root}>
       {/* HEADER */}
@@ -88,13 +85,9 @@ export default function PlayerScreen() {
 
       {/* PROGRESS */}
       <View style={styles.progressSection}>
-        <Slider
-          style={styles.slider}
-          value={progress}
-          onSlidingComplete={(val) => player.seekTo(val)}
-          minimumTrackTintColor={COLORS.accent}
-          maximumTrackTintColor={COLORS.cardBorder}
-          thumbTintColor={COLORS.accent}
+        <ProgressBar
+          value={player.durationMs > 0 ? player.positionMs / player.durationMs : 0}
+          onSeek={(ratio) => player.seekTo(ratio)}
         />
         <View style={styles.timeRow}>
           <Text style={styles.timeText}>{formatTime(player.positionMs)}</Text>
@@ -244,10 +237,6 @@ const styles = StyleSheet.create({
   },
   progressSection: {
     paddingHorizontal: 16,
-  },
-  slider: {
-    width: "100%",
-    height: 40,
   },
   timeRow: {
     flexDirection: "row",
