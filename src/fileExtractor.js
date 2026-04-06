@@ -1,6 +1,5 @@
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { EPub } from "epub2";
-import { promisify } from "util";
 import { writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -25,20 +24,61 @@ export async function extractEpub(buffer) {
 
     for (const chapter of epub.flow) {
       try {
-        const getChapter = promisify(epub.getChapter.bind(epub));
-        const html = await getChapter(chapter.id);
-        // Strip HTML tags for plain text
-        const text = html.replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").trim();
-        if (text.length > 50) {
-          chapters.push({ title: chapter.title || "", text });
+        const text = await new Promise((resolve, reject) => {
+          epub.getChapter(chapter.id, (err, data) => {
+            if (err) reject(err);
+            else resolve(data);
+          });
+        });
+        // Odstraň HTML tagy
+        const clean = text
+          .replace(/<[^>]*>/g, " ")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        const SKIP_TITLES = [
+          "table of contents",
+          "contents",
+          "index",
+          "bibliography",
+          "acknowledgements",
+          "acknowledgments",
+          "about the author",
+          "also by",
+          "copyright",
+          "dedication",
+          "cover",
+          "title page",
+          "half title",
+        ];
+
+        const rawTitle = (chapter.title ?? "").toLowerCase().trim();
+        // Filtruj POUZE pokud má kapitola explicitní název který matchuje
+        // Pokud title chybí nebo je prázdný, kapitolu NEVYNECHÁVEJ
+        const shouldSkip = rawTitle.length > 0 &&
+          SKIP_TITLES.some(skip => rawTitle === skip || rawTitle.startsWith(skip));
+
+        if (clean.length > 200 && !shouldSkip) {
+          chapters.push({
+            id: chapter.id,
+            title: chapter.title?.trim() || `Chapter ${chapters.length + 1}`,
+            text: clean,
+          });
         }
-      } catch {
-        // Skip unreadable chapters
+      } catch (e) {
+        console.warn(`Skipping chapter ${chapter.id}:`, e.message);
       }
     }
 
-    const text = chapters.map((c) => c.text).join("\n\n");
-    return { text, chapterCount: chapters.length, chapters };
+    return {
+      text: chapters.map((c) => c.text).join("\n\n"),
+      chapters,
+      chapterCount: chapters.length,
+    };
   } finally {
     await unlink(tmpPath).catch(() => {});
   }
