@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -11,7 +12,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { COLORS } from "../constants/config";
+import { API_BASE, COLORS } from "../constants/config";
 import * as api from "../lib/api";
 import { usePlayer } from "../lib/player";
 
@@ -50,6 +51,36 @@ export default function PlayerScreen() {
   const [chapterTitle, setChapterTitle] = useState(title);
   const [naturalText, setNaturalText] = useState(params.naturalText ?? "");
   const [isLoadingChapter, setIsLoadingChapter] = useState(false);
+  const [coverImageUrl, setCoverImageUrl] = useState<string | null>(null);
+  const [isCzechMode, setIsCzechMode] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+
+  // Poll for cover image
+  useEffect(() => {
+    const sid = params.sessionId as string;
+    console.log("Player sessionId:", sid);
+    if (!sid) {
+      console.warn("No sessionId — cover polling skipped");
+      return;
+    }
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      if (attempts > 30) { clearInterval(poll); return; } // 30 × 4s = 2 minuty
+      try {
+        const res = await fetch(`${API_BASE}/book/${sid}/cover`);
+        const data = await res.json();
+        if (data.ready && data.coverImageUrl) {
+          setCoverImageUrl(data.coverImageUrl);
+          clearInterval(poll);
+        } else if (!data.generating && attempts > 5) {
+          // Generace skončila ale bez výsledku — zastav polling
+          clearInterval(poll);
+        }
+      } catch (_) {}
+    }, 4000);
+    return () => clearInterval(poll);
+  }, []);
 
   useEffect(() => {
     if (audioUrl) {
@@ -69,7 +100,13 @@ export default function PlayerScreen() {
     if (!sessionId || newIndex < 0 || newIndex >= totalChapters) return;
     setIsLoadingChapter(true);
     try {
-      const result = await api.getChapter(sessionId, newIndex);
+      const lang = isCzechMode ? "cs" : "en";
+      const voice = isCzechMode ? "cs-CZ-AntoninNeural" : "af_bella";
+      const res = await fetch(
+        `${API_BASE}/book/${sessionId}/chapter/${newIndex}?lang=${lang}&voice=${voice}`
+      );
+      if (!res.ok) throw new Error((await res.json()).error);
+      const result = await res.json();
       setChapterIndex(newIndex);
       setChapterTitle(result.chapterTitle ?? `Chapter ${newIndex + 1}`);
       setNaturalText(result.naturalText ?? "");
@@ -78,6 +115,30 @@ export default function PlayerScreen() {
       Alert.alert("Error", e.message);
     } finally {
       setIsLoadingChapter(false);
+    }
+  }
+
+  async function handleTranslate() {
+    const sid = params.sessionId as string;
+    if (!sid) return;
+    const newCzech = !isCzechMode;
+    setIsCzechMode(newCzech);
+    setIsTranslating(true);
+    try {
+      const lang = newCzech ? "cs" : "en";
+      const voice = newCzech ? "cs-CZ-AntoninNeural" : "af_bella";
+      const res = await fetch(
+        `${API_BASE}/book/${sid}/chapter/${chapterIndex}?lang=${lang}&voice=${voice}`
+      );
+      if (!res.ok) throw new Error((await res.json()).error);
+      const result = await res.json();
+      setNaturalText(result.naturalText ?? "");
+      await player.loadAndPlay(result.audioUrl, result.chapterTitle);
+    } catch (e: any) {
+      Alert.alert("Chyba překladu", e.message);
+      setIsCzechMode(!newCzech); // rollback
+    } finally {
+      setIsTranslating(false);
     }
   }
 
@@ -92,7 +153,16 @@ export default function PlayerScreen() {
           {siteName || "Article"}
         </Text>
 
-        <View style={styles.headerSpacer} />
+        <TouchableOpacity
+          onPress={handleTranslate}
+          disabled={isTranslating || !params.sessionId}
+          style={styles.translateBtn}
+        >
+          {isTranslating
+            ? <ActivityIndicator color={COLORS.accent} size="small" />
+            : <Text style={[styles.translateBtnText, isCzechMode && { opacity: 1 }]}>🇨🇿</Text>
+          }
+        </TouchableOpacity>
       </View>
 
       {/* TITLE */}
@@ -103,12 +173,20 @@ export default function PlayerScreen() {
 
       {/* COVER ART */}
       <View style={styles.coverContainer}>
-        <View style={styles.cover}>
-          <Text style={styles.coverEmoji}>🎧</Text>
-          <View style={styles.badge}>
-            <Text style={styles.badgeText}>AI Enhanced</Text>
+        {coverImageUrl ? (
+          <Image
+            source={{ uri: coverImageUrl }}
+            style={styles.coverImage}
+            resizeMode="cover"
+          />
+        ) : (
+          <View style={styles.cover}>
+            <Text style={styles.coverEmoji}>🎧</Text>
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>AI Enhanced</Text>
+            </View>
           </View>
-        </View>
+        )}
       </View>
 
       {/* PROGRESS */}
@@ -241,8 +319,15 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
   },
-  headerSpacer: {
+  translateBtn: {
     width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  translateBtnText: {
+    fontSize: 22,
+    opacity: 0.4,
   },
   titleSection: {
     paddingHorizontal: 20,
@@ -262,6 +347,11 @@ const styles = StyleSheet.create({
   coverContainer: {
     alignItems: "center",
     marginVertical: 24,
+  },
+  coverImage: {
+    width: 220,
+    height: 220,
+    borderRadius: 24,
   },
   cover: {
     width: 220,

@@ -151,6 +151,7 @@ export default function HomeScreen() {
         siteName: `${bookSession.filename} · Ch. ${result.chapterIndex + 1}/${result.totalChapters}`,
       };
       await recentItems.addItem(item);
+      console.log("sessionId passed to player:", bookSession.sessionId);
       router.push({
         pathname: "/player",
         params: {

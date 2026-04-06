@@ -15,12 +15,18 @@ import { naturalizeText } from "./naturalizer.js";
 import { synthesize } from "./tts.js";
 import { extractPdf, extractEpub } from "./fileExtractor.js";
 import * as cache from "./cache.js";
+import { generateCoverImage } from "./coverImage.js";
+import { translateAndNaturalize } from "./translator.js";
+import { synthesizeCzech } from "./azureTts.js";
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+const MAX_WORDS_PER_CHAPTER = parseInt(process.env.MAX_WORDS_PER_CHAPTER ?? "8000");
+const COVER_IMAGE_ENABLED = process.env.COVER_IMAGE_ENABLED !== "false";
 
 const bookSessions = new Map();
 // session: { id, filename, chapters, voice, processed: Map<index, {audioUrl, naturalText}> }
@@ -215,17 +221,24 @@ app.post("/book/load", upload.single("file"), async (req, res) => {
     }
 
     const sessionId = Date.now().toString();
-    bookSessions.set(sessionId, {
+
+    // Vytvoř session PŘED použitím v background tasks
+    const session = {
       id: sessionId,
       filename: file.originalname,
       chapters: extracted.chapters,
       voice,
       processed: new Map(),
+      coverImageUrl: null,
+      coverGenerating: false,
+      totalCost: 0,
       _processing: null,
-    });
+    };
+    bookSessions.set(sessionId, session);
 
     console.log(`[book/load] Session ${sessionId}: ${extracted.chapters.length} chapters`);
 
+    // Odpověz JEDNOU — pak spusť background tasks
     res.json({
       sessionId,
       filename: file.originalname,
@@ -236,17 +249,58 @@ app.post("/book/load", upload.single("file"), async (req, res) => {
         length: c.text.length,
       })),
     });
+
+    // Background cover image — AŽ PO res.json()
+    if (COVER_IMAGE_ENABLED) {
+      session.coverGenerating = true;
+      (async () => {
+        try {
+          const first = session.chapters[0];
+          if (first) {
+            const previewText = first.text.split(/\s+/).slice(0, 500).join(" ");
+            const url = await generateCoverImage(previewText, file.originalname);
+            if (url) {
+              session.coverImageUrl = url;
+              console.log(`[cover] Ready`);
+            }
+          }
+        } catch (e) {
+          console.warn("[cover]", e.message);
+        } finally {
+          session.coverGenerating = false;
+        }
+      })();
+    } else {
+      console.log("[cover] Disabled via COVER_IMAGE_ENABLED=false");
+    }
   } catch (err) {
     console.error("[book/load]", err.message);
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
-// GET /book/:sessionId/chapter/:index — zpracuje kapitolu, cachuje, spustí pre-fetch další
+// GET /book/:sessionId/cover
+app.get("/book/:sessionId/cover", (req, res) => {
+  const session = bookSessions.get(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: "Not found" });
+  res.json({
+    coverImageUrl: session.coverImageUrl ?? null,
+    ready: !!session.coverImageUrl,
+    generating: session.coverGenerating ?? false,
+    estimatedCost: session.totalCost ?? 0,
+  });
+});
+
+// GET /book/:sessionId/chapter/:index?lang=en|cs&voice=...
 app.get("/book/:sessionId/chapter/:index", async (req, res) => {
   const { sessionId, index } = req.params;
   const chapterIndex = parseInt(index);
+  const lang = req.query.lang ?? "en";
   const session = bookSessions.get(sessionId);
+  const voice = req.query.voice ?? (lang === "cs" ? "cs-CZ-AntoninNeural" : session?.voice ?? "af_bella");
+  const cacheKey = `${chapterIndex}_${lang}`;
 
   if (!session) return res.status(404).json({ error: "Session not found" });
 
@@ -254,9 +308,9 @@ app.get("/book/:sessionId/chapter/:index", async (req, res) => {
   if (!chapter) return res.status(404).json({ error: "Chapter not found" });
 
   // Cache hit
-  if (session.processed.has(chapterIndex)) {
-    console.log(`[book] Cache hit: chapter ${chapterIndex}`);
-    const cached = session.processed.get(chapterIndex);
+  if (session.processed.has(cacheKey)) {
+    console.log(`[book] Cache hit: chapter ${chapterIndex} (${lang})`);
+    const cached = session.processed.get(cacheKey);
     _preProcessNext(session, chapterIndex + 1);
     return res.json({
       ...cached,
@@ -267,12 +321,40 @@ app.get("/book/:sessionId/chapter/:index", async (req, res) => {
     });
   }
 
-  console.log(`[book] Processing chapter ${chapterIndex}: "${chapter.title}" (${chapter.text.length} chars)`);
+  // Ořízni text na MAX_WORDS_PER_CHAPTER slov
+  const words = chapter.text.split(/\s+/);
+  const truncated = words.length > MAX_WORDS_PER_CHAPTER;
+  const textToProcess = truncated
+    ? words.slice(0, MAX_WORDS_PER_CHAPTER).join(" ")
+    : chapter.text;
+  if (truncated) {
+    console.log(`[book] Chapter ${chapterIndex} truncated: ${words.length} → ${MAX_WORDS_PER_CHAPTER} words`);
+  }
+
+  console.log(`[book] Processing chapter ${chapterIndex} (${lang}): "${chapter.title}" (${textToProcess.split(/\s+/).length} words)`);
   try {
-    const naturalText = await naturalizeText(chapter.text);
-    const audioUrl = await synthesize(naturalText, session.voice);
-    const result = { audioUrl, naturalText };
-    session.processed.set(chapterIndex, result);
+    let processedText;
+    if (lang === "cs") {
+      console.log(`[book] Translating chapter ${chapterIndex} to Czech...`);
+      processedText = await translateAndNaturalize(textToProcess);
+    } else {
+      processedText = await naturalizeText(textToProcess);
+    }
+
+    let audioUrl;
+    if (lang === "cs") {
+      audioUrl = await synthesizeCzech(processedText, voice);
+    } else {
+      audioUrl = await synthesize(processedText, session.voice ?? voice);
+    }
+
+    // Odhadovaná cena: Haiku ~$0.0004/1K input tokens + TTS
+    const estimatedChapterCost = parseFloat(((textToProcess.length / 4000) * 0.001 + 0.005).toFixed(4));
+    session.totalCost = (session.totalCost ?? 0) + estimatedChapterCost;
+    console.log(`[book] Chapter ${chapterIndex} done (~$${estimatedChapterCost}, total ~$${session.totalCost.toFixed(4)})`);
+
+    const result = { audioUrl, naturalText: processedText };
+    session.processed.set(cacheKey, result);
 
     _preProcessNext(session, chapterIndex + 1);
 
@@ -291,7 +373,8 @@ app.get("/book/:sessionId/chapter/:index", async (req, res) => {
 
 async function _preProcessNext(session, nextIndex) {
   if (nextIndex >= session.chapters.length) return;
-  if (session.processed.has(nextIndex)) return;
+  const cacheKey = `${nextIndex}_en`;
+  if (session.processed.has(cacheKey)) return;
   if (session._processing === nextIndex) return;
 
   session._processing = nextIndex;
@@ -300,7 +383,7 @@ async function _preProcessNext(session, nextIndex) {
   try {
     const naturalText = await naturalizeText(chapter.text);
     const audioUrl = await synthesize(naturalText, session.voice);
-    session.processed.set(nextIndex, { audioUrl, naturalText });
+    session.processed.set(cacheKey, { audioUrl, naturalText });
     console.log(`[book] Pre-processed chapter ${nextIndex} ✓`);
   } catch (err) {
     console.warn(`[book] Pre-processing failed for chapter ${nextIndex}:`, err.message);
