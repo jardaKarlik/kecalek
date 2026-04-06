@@ -3,6 +3,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -11,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { COLORS } from "../constants/config";
+import * as api from "../lib/api";
 import { usePlayer } from "../lib/player";
 
 function formatTime(ms: number): string {
@@ -29,16 +31,25 @@ export default function PlayerScreen() {
     siteName: string;
     byline: string;
     naturalText: string;
+    sessionId?: string;
+    chapterIndex?: string;
+    totalChapters?: string;
   }>();
 
   const player = usePlayer();
   const [speed, setSpeed] = useState(1);
 
   const audioUrl: string | string[] = params.audioUrl ? JSON.parse(params.audioUrl) : "";
-  const title = params.title ?? "Article";
   const siteName = params.siteName ?? "";
   const byline = params.byline ?? "";
-  const naturalText = params.naturalText ?? "";
+
+  const sessionId = params.sessionId;
+  const totalChapters = parseInt(params.totalChapters ?? "1");
+  const [chapterIndex, setChapterIndex] = useState(parseInt(params.chapterIndex ?? "0"));
+  const title = (params.title as string) ?? "Chapter";
+  const [chapterTitle, setChapterTitle] = useState(title);
+  const [naturalText, setNaturalText] = useState(params.naturalText ?? "");
+  const [isLoadingChapter, setIsLoadingChapter] = useState(false);
 
   useEffect(() => {
     if (audioUrl) {
@@ -54,6 +65,22 @@ export default function PlayerScreen() {
     await player.setRate(rate);
   }
 
+  async function goToChapterByIndex(newIndex: number) {
+    if (!sessionId || newIndex < 0 || newIndex >= totalChapters) return;
+    setIsLoadingChapter(true);
+    try {
+      const result = await api.getChapter(sessionId, newIndex);
+      setChapterIndex(newIndex);
+      setChapterTitle(result.chapterTitle ?? `Chapter ${newIndex + 1}`);
+      setNaturalText(result.naturalText ?? "");
+      await player.loadAndPlay(result.audioUrl, result.chapterTitle ?? `Chapter ${newIndex + 1}`);
+    } catch (e: any) {
+      Alert.alert("Error", e.message);
+    } finally {
+      setIsLoadingChapter(false);
+    }
+  }
+
   return (
     <SafeAreaView style={styles.root}>
       {/* HEADER */}
@@ -64,12 +91,13 @@ export default function PlayerScreen() {
         <Text style={styles.headerSite} numberOfLines={1}>
           {siteName || "Article"}
         </Text>
+
         <View style={styles.headerSpacer} />
       </View>
 
       {/* TITLE */}
       <View style={styles.titleSection}>
-        <Text style={styles.title} numberOfLines={3}>{title}</Text>
+        <Text style={styles.title} numberOfLines={3}>{chapterTitle ?? "Chapter"}</Text>
         {!!byline && <Text style={styles.byline}>{byline}</Text>}
       </View>
 
@@ -138,6 +166,29 @@ export default function PlayerScreen() {
           <Text style={styles.seekBtnText}>+30s</Text>
         </TouchableOpacity>
       </View>
+
+      {/* CHAPTER NAVIGATION */}
+      {sessionId && (
+        <View style={styles.chapterNav}>
+          <TouchableOpacity
+            onPress={() => goToChapterByIndex(chapterIndex - 1)}
+            disabled={chapterIndex === 0 || isLoadingChapter}
+            style={[styles.chapterBtn, chapterIndex === 0 && styles.chapterBtnDisabled]}
+          >
+            <Text style={styles.chapterBtnText}>‹ Prev</Text>
+          </TouchableOpacity>
+          <Text style={styles.chapterInfo}>
+            {isLoadingChapter ? "Loading..." : `Ch. ${chapterIndex + 1} / ${totalChapters}`}
+          </Text>
+          <TouchableOpacity
+            onPress={() => goToChapterByIndex(chapterIndex + 1)}
+            disabled={chapterIndex >= totalChapters - 1 || isLoadingChapter}
+            style={[styles.chapterBtn, chapterIndex >= totalChapters - 1 && styles.chapterBtnDisabled]}
+          >
+            <Text style={styles.chapterBtnText}>Next ›</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* SPEED */}
       <View style={styles.speedRow}>
@@ -299,6 +350,33 @@ const styles = StyleSheet.create({
   speedTextSelected: {
     color: COLORS.text,
     fontWeight: "600",
+  },
+  chapterNav: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    marginBottom: 8,
+  },
+  chapterBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: COLORS.card,
+    borderWidth: 0.5,
+    borderColor: COLORS.cardBorder,
+  },
+  chapterBtnDisabled: {
+    opacity: 0.3,
+  },
+  chapterBtnText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  chapterInfo: {
+    color: COLORS.textMuted,
+    fontSize: 13,
   },
   transcript: {
     flex: 1,

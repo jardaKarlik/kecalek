@@ -33,9 +33,16 @@ export default function HomeScreen() {
   const [processingMessage, setProcessingMessage] = useState(PROCESSING_MESSAGES[0]);
   const [fileResult, setFileResult] = useState<{
     filename: string;
-    text: string;
-    pageCount?: number;
+    uri: string;
+    mimeType: string;
     chapterCount?: number;
+  } | null>(null);
+  const [bookSession, setBookSession] = useState<{
+    sessionId: string;
+    filename: string;
+    totalChapters: number;
+    currentChapter: number;
+    chapters: { index: number; title: string; length: number }[];
   } | null>(null);
 
   const recentItems = useRecentItems();
@@ -106,10 +113,21 @@ export default function HomeScreen() {
     setIsProcessing(true);
     startProcessingMessages();
     try {
-      const extracted = await api.extractFile(file.uri, file.name, file.mimeType ?? "application/octet-stream");
-      setFileResult(extracted);
+      const session = await api.loadBook(
+        file.uri,
+        file.name,
+        file.mimeType ?? "application/octet-stream",
+        selectedVoice
+      );
+      setBookSession({ ...session, currentChapter: 0 });
+      setFileResult({
+        filename: file.name,
+        uri: file.uri,
+        mimeType: file.mimeType ?? "application/octet-stream",
+        chapterCount: session.totalChapters,
+      });
     } catch (e: any) {
-      Alert.alert("Error", e.message ?? "Something went wrong");
+      Alert.alert("Error", e.message);
     } finally {
       clearProcessingMessages();
       setIsProcessing(false);
@@ -117,32 +135,35 @@ export default function HomeScreen() {
   }
 
   async function handleReadFile() {
-    if (!fileResult) return;
+    if (!bookSession) return;
     setIsProcessing(true);
     startProcessingMessages();
     try {
-      const result = await api.processChapter(fileResult.text, fileResult.filename, selectedVoice);
+      const result = await api.getChapter(bookSession.sessionId, bookSession.currentChapter);
       const item: RecentItem = {
         id: Date.now().toString(),
-        title: fileResult.filename,
+        title: result.chapterTitle,
         source: "file",
-        originalInput: fileResult.filename,
+        originalInput: bookSession.filename,
         audioUrl: result.audioUrl,
         naturalText: result.naturalText,
         timestamp: Date.now(),
+        siteName: `${bookSession.filename} · Ch. ${result.chapterIndex + 1}/${result.totalChapters}`,
       };
       await recentItems.addItem(item);
       router.push({
         pathname: "/player",
         params: {
           audioUrl: JSON.stringify(result.audioUrl),
-          title: fileResult.filename,
-          siteName: "",
+          title: result.chapterTitle,
+          siteName: `${bookSession.filename} · Ch. ${result.chapterIndex + 1}/${result.totalChapters}`,
           byline: "",
           naturalText: result.naturalText,
+          sessionId: bookSession.sessionId,
+          chapterIndex: String(result.chapterIndex),
+          totalChapters: String(result.totalChapters),
         },
       });
-      setFileResult(null);
     } catch (e: any) {
       Alert.alert("Error", e.message ?? "Something went wrong");
     } finally {
